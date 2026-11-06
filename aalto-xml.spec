@@ -1,89 +1,102 @@
-%{?_javapackages_macros:%_javapackages_macros}
+Name:		aalto-xml
+Version:	1.4.0
+Release:	1
+Summary:	Non-blocking StAX and SAX XML processor
+Group:		Development/Java
+License:	ASL 2.0
+URL:		https://github.com/FasterXML/aalto-xml
+Source0:	https://github.com/FasterXML/aalto-xml/archive/refs/tags/aalto-xml-%{version}.tar.gz#/aalto-xml-%{version}.tar.gz
 
-Name:          aalto-xml
-Version:       1.0.0
-Release:       4.1
-Summary:       Ultra-high performance non-blocking XML processor (Stax/Stax2, SAX/SAX2)
-# Source files without license headers https://github.com/FasterXML/aalto-xml/issues/38
-# See https://github.com/FasterXML/jackson-modules-base/issues/18, from main developer:
-# "To whoever it concerns: policy of the Jackson project is to only include licensing information as project
-# level metadata (in repo, pom.xml, artifact within source and binary jars), and not as headers in source files.
-# Licensing is Apache License 2.0, for Jackson 2.x as indicated by various artifacts, and we have no plans to change this."
-License:       ASL 2.0
-URL:           https://wiki.fasterxml.com/AaltoHome
-Source0:       https://github.com/FasterXML/aalto-xml/archive/%{name}-%{version}.tar.gz
-
-BuildRequires: maven-local
-BuildRequires: mvn(com.fasterxml:oss-parent:pom:)
-BuildRequires: mvn(junit:junit)
-BuildRequires: mvn(org.apache.felix:maven-bundle-plugin)
-BuildRequires: mvn(org.codehaus.woodstox:stax2-api)
-
-BuildArch:     noarch
+BuildArch:	noarch
+Obsoletes:	%{name}-javadoc < %{version}
+BuildRequires:	mvn(com.fasterxml:oss-parent:pom::)
+# oss-parent pins the compiler plugin to this ASM jar.
+BuildRequires:	mvn(org.ow2.asm:asm)
+BuildRequires:	mvn(org.codehaus.woodstox:stax2-api)
+# Literal, so the first rpmbuild -bs records them before sysjar is installed.
+BuildRequires:	maven
+BuildRequires:	java-current-devel
+BuildSystem:	maven
+BuildOption(install):	--file-name aalto-xml
 
 %description
-The Aalto XML processor is a StAX XML processor implementation. It
-is not directly related to other existing mature implementations
-(such as Woodstox or Sun Java Streaming XML Parser), although it
-did come about as a prototype for evaluating implementation strategies
-that differ from those traditionally used for Java-based parsers.
-
-Two main goals (above and beyond stock StAX/SAX API implementation) are:
-
-° Ultra-high performance parsing by making the Common Case Fast
-  (similar to original RISC manifesto). This may mean limiting
-  functionality, but never compromising correctness. XML 1.0
-  compliance is not sacrificed for speed.
-
-° Allowing non-block, asynchronous parsing: it should be possible to
-  "feed" more input and incrementally get more XML events out, without
-  forcing the current thread to block on I/O read operation.
-
-%package javadoc
-Summary:       Javadoc for %{name}
-
-%description javadoc
-This package contains javadoc for %{name}.
+Aalto is a StAX and SAX XML processor aimed at fast parsing and
+non-blocking input. 1.4.0 requires Java 8. It completes XMLStreamWriter
+validation and fixes namespace repair, CDATA boundaries, and DTD root
+names. It implements StAX2. Tests are skipped. The OSGi bundle
+descriptor and the Java module descriptor are left out.
 
 %prep
-%setup -q -n %{name}-%{name}-%{version}
-# Cleanup
-find -name "*.class" -print -delete
-find -name "*.jar" -print -delete
+%autosetup -n aalto-xml-aalto-xml-%{version}
+# packaging bundle needs the Felix plugin, which is not packaged.
+# Moditect is on the keep list and would run during package.
+# JaCoCo binds prepare-agent to initialize. Test dependencies are
+# JUnit 5 and Woodstox. .mvn points the wrapper at a Maven download.
+python - <<'PY'
+import shutil
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
-sed -i 's/\r//' src/main/resources/META-INF/LICENSE
-sed -i 's/\r//' release-notes/asl/*
-mv release-notes/asl/ASL2.0 LICENSE
-mv release-notes/asl/LICENSE NOTICE
+ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
+ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
 
-%mvn_file : %{name}
+def local(tag):
+    return tag.rsplit("}", 1)[-1]
 
-%build
+drop_plugins = {
+    "central-publishing-maven-plugin",
+    "moditect-maven-plugin",
+    "jacoco-maven-plugin",
+    "maven-surefire-plugin",
+}
 
-%mvn_build
-
-%install
-%mvn_install
+path = Path("pom.xml")
+tree = ET.parse(path)
+root = tree.getroot()
+packaging = None
+removed = []
+removed_tests = 0
+kept_stax = False
+for parent in list(root.iter()):
+    for child in list(parent):
+        name = local(child.tag)
+        if name == "packaging" and (child.text or "").strip() == "bundle":
+            child.text = "jar"
+            packaging = "jar"
+        if name == "dependency" and local(parent.tag) == "dependencies":
+            artifact = ""
+            scope = ""
+            for item in child:
+                if local(item.tag) == "artifactId":
+                    artifact = (item.text or "").strip()
+                if local(item.tag) == "scope":
+                    scope = (item.text or "").strip()
+            if artifact == "stax2-api" and scope != "test":
+                kept_stax = True
+                continue
+            if scope == "test":
+                parent.remove(child)
+                removed_tests += 1
+            continue
+        if name != "plugin":
+            continue
+        artifact = ""
+        for item in child:
+            if local(item.tag) == "artifactId":
+                artifact = (item.text or "").strip()
+        if artifact in drop_plugins:
+            parent.remove(child)
+            removed.append(artifact)
+if packaging != "jar" or sorted(removed) != sorted(drop_plugins) or removed_tests != 2 or not kept_stax:
+    raise SystemExit(
+        f"packaging={packaging} removed={removed} tests={removed_tests} stax={kept_stax}"
+    )
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+wrapper = Path(".mvn")
+if not wrapper.is_dir():
+    raise SystemExit(".mvn missing")
+shutil.rmtree(wrapper)
+PY
 
 %files -f .mfiles
-%doc README.md release-notes/*
-%doc LICENSE NOTICE
-
-%files javadoc -f .mfiles-javadoc
-%doc LICENSE NOTICE
-
-%changelog
-* Wed Sep 06 2017 Troy Dawson <tdawson@redhat.com> - 1.0.0-4
-- Cleanup spec file conditionals
-
-* Wed Jul 26 2017 Fedora Release Engineering <releng@fedoraproject.org> - 1.0.0-3
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_27_Mass_Rebuild
-
-* Fri Feb 10 2017 Fedora Release Engineering <releng@fedoraproject.org> - 1.0.0-2
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_26_Mass_Rebuild
-
-* Thu Nov 17 2016 gil cattaneo <puntogil@libero.it> 1.0.0-1
-- Update to 1.0.0
-
-* Tue Jun 14 2016 gil cattaneo <puntogil@libero.it> 0.9.11-1
-- initial rpm
+%doc LICENSE README.md release-notes/VERSION
